@@ -1,18 +1,17 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import scrolledtext
 import threading
 import subprocess
 import sys
 import os
 
-# --- Auto-install missing packages ---
 def install(pkg):
     subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--break-system-packages", "-q"])
 
 try:
-    from PIL import Image, ImageTk, ImageGrab, ImageDraw
+    from PIL import Image, ImageTk, ImageGrab
 except ImportError:
-    install("pillow"); from PIL import Image, ImageTk, ImageGrab, ImageDraw
+    install("pillow"); from PIL import Image, ImageTk, ImageGrab
 
 try:
     import pytesseract
@@ -32,74 +31,269 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────
-#  Overlay window for area selection
+#  Popup translation window
+# ─────────────────────────────────────────────
+class TranslationPopup(tk.Toplevel):
+    def __init__(self, master, text, x, y):
+        super().__init__(master)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg="#1e1e2e")
+
+        # Shadow border frame
+        outer = tk.Frame(self, bg="#3a3a5c", padx=1, pady=1)
+        outer.pack(fill="both", expand=True)
+
+        inner = tk.Frame(outer, bg="#1e1e2e")
+        inner.pack(fill="both", expand=True)
+
+        # Header
+        hdr = tk.Frame(inner, bg="#2a2a42", pady=6, padx=10)
+        hdr.pack(fill="x")
+
+        tk.Label(hdr, text="🔍 Переклад EN → UA",
+                 bg="#2a2a42", fg="#a0a0cc",
+                 font=("Segoe UI", 9)).pack(side="left")
+
+        tk.Button(hdr, text="✕",
+                  bg="#2a2a42", fg="#888",
+                  font=("Segoe UI", 9), relief="flat",
+                  bd=0, cursor="hand2",
+                  activebackground="#ff5555",
+                  activeforeground="white",
+                  command=self.destroy).pack(side="right")
+
+        # Translation text
+        self.txt = tk.Text(
+            inner,
+            font=("Segoe UI", 11),
+            bg="#1e1e2e", fg="#e0e0ff",
+            relief="flat", bd=0,
+            wrap="word",
+            padx=12, pady=10,
+            cursor="arrow",
+            width=40, height=6,
+            selectbackground="#3a3a6a",
+            selectforeground="white"
+        )
+        self.txt.pack(fill="both", expand=True, padx=2)
+        self.txt.insert("1.0", text)
+        self.txt.config(state="disabled")
+
+        # Footer with copy button
+        ftr = tk.Frame(inner, bg="#161626", pady=5, padx=10)
+        ftr.pack(fill="x")
+
+        self.copy_btn = tk.Button(
+            ftr, text="📋 Копіювати",
+            bg="#2a2a42", fg="#a0a0cc",
+            font=("Segoe UI", 9), relief="flat",
+            bd=0, cursor="hand2", padx=8, pady=3,
+            activebackground="#3a3a62",
+            activeforeground="white",
+            command=self._copy
+        )
+        self.copy_btn.pack(side="left")
+
+        tk.Label(ftr, text="ESC — закрити",
+                 bg="#161626", fg="#555",
+                 font=("Segoe UI", 8)).pack(side="right")
+
+        # Auto-resize text area based on content
+        self.txt.update_idletasks()
+        lines = text.count('\n') + 1
+        words = len(text.split())
+        h = max(4, min(12, lines + words // 35 + 1))
+        self.txt.config(height=h)
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<FocusOut>", self._on_focus_out)
+
+        # Position popup near selection
+        self.update_idletasks()
+        pw = self.winfo_reqwidth()
+        ph = self.winfo_reqheight()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+
+        px = min(x, sw - pw - 10)
+        py = min(y + 20, sh - ph - 10)
+        self.geometry(f"+{px}+{py}")
+
+        self.focus_force()
+
+    def _on_focus_out(self, e):
+        # Don't close if focus went to child widget
+        try:
+            fw = self.focus_get()
+            if fw and (fw == self or str(fw).startswith(str(self))):
+                return
+        except Exception:
+            pass
+        # Close after small delay to allow button clicks
+        self.after(150, self._check_focus)
+
+    def _check_focus(self):
+        try:
+            fw = self.focus_get()
+            if fw is None or not str(fw).startswith(str(self)):
+                self.destroy()
+        except Exception:
+            self.destroy()
+
+    def _copy(self):
+        text = self.txt.get("1.0", "end").strip()
+        if HAS_CLIPBOARD:
+            pyperclip.copy(text)
+        else:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        self.copy_btn.config(text="✅ Скопійовано")
+        self.after(1500, lambda: self.copy_btn.config(text="📋 Копіювати"))
+
+
+# ─────────────────────────────────────────────
+#  Loading popup
+# ─────────────────────────────────────────────
+class LoadingPopup(tk.Toplevel):
+    def __init__(self, master, x, y):
+        super().__init__(master)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg="#1e1e2e")
+
+        outer = tk.Frame(self, bg="#3a3a5c", padx=1, pady=1)
+        outer.pack(fill="both", expand=True)
+
+        tk.Label(outer, text="⏳  Розпізнавання і переклад…",
+                 bg="#1e1e2e", fg="#a0a0cc",
+                 font=("Segoe UI", 10),
+                 padx=16, pady=12).pack()
+
+        self.update_idletasks()
+        self.geometry(f"+{x}+{y+20}")
+
+
+# ─────────────────────────────────────────────
+#  Full-screen selection overlay
 # ─────────────────────────────────────────────
 class SelectionOverlay(tk.Toplevel):
     def __init__(self, master, callback):
         super().__init__(master)
         self.callback = callback
         self.start_x = self.start_y = 0
+        self.cur_x = self.cur_y = 0
         self.rect = None
+        self.dim_rects = []
 
         self.attributes("-fullscreen", True)
-        self.attributes("-alpha", 0.25)
         self.attributes("-topmost", True)
-        self.configure(bg="black", cursor="crosshair")
+        self.attributes("-alpha", 0.01)
+        self.configure(bg="black")
         self.overrideredirect(True)
 
-        self.canvas = tk.Canvas(self, bg="black", highlightthickness=0)
+        self.canvas = tk.Canvas(self, bg="black",
+                                highlightthickness=0,
+                                cursor="crosshair")
         self.canvas.pack(fill="both", expand=True)
 
-        lbl = tk.Label(self.canvas, text="Виділіть область з текстом  •  ESC — скасувати",
-                       bg="#1a1a2e", fg="white", font=("Segoe UI", 14), pady=8, padx=16)
-        lbl.place(relx=0.5, rely=0.02, anchor="n")
+        # Hint label
+        sw = self.winfo_screenwidth()
+        hint = tk.Label(self.canvas,
+                        text="  Виділіть область з текстом  •  ESC — скасувати  ",
+                        bg="#1e1e2e", fg="#c0c0e0",
+                        font=("Segoe UI", 12), pady=8, padx=16,
+                        relief="flat")
+        hint.place(x=sw//2, y=16, anchor="n")
 
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.bind("<Escape>", lambda e: self.destroy())
 
-    def on_press(self, e):
-        self.start_x, self.start_y = e.x, e.y
-        if self.rect:
-            self.canvas.delete(self.rect)
+        # Fade in
+        self._alpha = 0.01
+        self._fade_in()
 
-    def on_drag(self, e):
+    def _fade_in(self):
+        self._alpha = min(self._alpha + 0.04, 0.35)
+        self.attributes("-alpha", self._alpha)
+        if self._alpha < 0.35:
+            self.after(20, self._fade_in)
+
+    def _redraw(self, x1, y1, x2, y2):
+        self.canvas.delete("dim")
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        # Dim everything outside selection
+        self.canvas.create_rectangle(0, 0, sw, y1,
+            fill="black", stipple="gray50", tags="dim")
+        self.canvas.create_rectangle(0, y1, x1, y2,
+            fill="black", stipple="gray50", tags="dim")
+        self.canvas.create_rectangle(x2, y1, sw, y2,
+            fill="black", stipple="gray50", tags="dim")
+        self.canvas.create_rectangle(0, y2, sw, sh,
+            fill="black", stipple="gray50", tags="dim")
+        # Selection border
         if self.rect:
             self.canvas.delete(self.rect)
         self.rect = self.canvas.create_rectangle(
-            self.start_x, self.start_y, e.x, e.y,
-            outline="#00d4ff", width=2, dash=(4, 2)
+            x1, y1, x2, y2,
+            outline="#00d4ff", width=2
+        )
+        # Size label
+        self.canvas.delete("size")
+        self.canvas.create_text(
+            x1 + 4, y1 - 14,
+            text=f"{abs(x2-x1)} × {abs(y2-y1)} px",
+            fill="#00d4ff", anchor="w",
+            font=("Segoe UI", 9), tags="size"
         )
 
-    def on_release(self, e):
+    def on_press(self, e):
+        self.start_x, self.start_y = e.x, e.y
+
+    def on_drag(self, e):
         x1, y1 = min(self.start_x, e.x), min(self.start_y, e.y)
         x2, y2 = max(self.start_x, e.x), max(self.start_y, e.y)
+        self._redraw(x1, y1, x2, y2)
+        self.cur_x, self.cur_y = e.x, e.y
+
+    def on_release(self, e):
+        x1 = min(self.start_x, e.x)
+        y1 = min(self.start_y, e.y)
+        x2 = max(self.start_x, e.x)
+        y2 = max(self.start_y, e.y)
         self.destroy()
         if x2 - x1 > 10 and y2 - y1 > 10:
             self.callback(x1, y1, x2, y2)
 
 
 # ─────────────────────────────────────────────
-#  Main application window
+#  Tray-like main window (tiny, stays on top)
 # ─────────────────────────────────────────────
 class OCRTranslatorApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("OCR Перекладач EN → UA")
-        self.geometry("680x620")
-        self.minsize(500, 500)
-        self.configure(bg="#f0f2f5")
-        self.resizable(True, True)
+        self.title("OCR EN→UA")
+        self.geometry("200x54")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+        self.configure(bg="#1e1e2e")
+        self.overrideredirect(False)
 
+        self._popup = None
+        self._loading = None
         self._tesseract_ok = self._check_tesseract()
         self._build_ui()
 
-        # Hotkey: Ctrl+Shift+S
         self.bind_all("<Control-Shift-s>", lambda e: self._start_selection())
         self.bind_all("<Control-Shift-S>", lambda e: self._start_selection())
 
-    # ── Tesseract check ──────────────────────
+        # Allow dragging window
+        self.bind("<ButtonPress-1>", self._drag_start)
+        self.bind("<B1-Motion>", self._drag_move)
+
     def _check_tesseract(self):
         paths = [
             r"C:\Program Files\Tesseract-OCR\tesseract.exe",
@@ -112,207 +306,108 @@ class OCRTranslatorApp(tk.Tk):
                 pytesseract.pytesseract.tesseract_cmd = p
                 return True
         try:
-            subprocess.run(["tesseract", "--version"],
-                           capture_output=True, check=True)
+            subprocess.run(["tesseract", "--version"], capture_output=True, check=True)
             return True
         except Exception:
             return False
 
-    # ── UI ──────────────────────────────────
     def _build_ui(self):
-        # ── Header ──
-        hdr = tk.Frame(self, bg="#1a1a2e", height=56)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text="🔍 OCR Перекладач  EN → UA",
-                 bg="#1a1a2e", fg="white",
-                 font=("Segoe UI", 14, "bold")).pack(side="left", padx=16, pady=12)
-        tk.Label(hdr, text="Ctrl+Shift+S",
-                 bg="#2d2d44", fg="#aaaacc",
-                 font=("Segoe UI", 10), padx=8, pady=2,
-                 relief="flat", bd=0).pack(side="right", padx=16, pady=16)
+        self.configure(bg="#1e1e2e")
 
-        # ── Tesseract warning ──
-        if not self._tesseract_ok:
-            warn = tk.Frame(self, bg="#fff3cd")
-            warn.pack(fill="x")
-            msg = ("⚠  Tesseract не знайдено!  "
-                   "Встановіть: https://github.com/UB-Mannheim/tesseract/wiki  "
-                   "(Windows) або  sudo apt install tesseract-ocr tesseract-ocr-eng  (Linux)")
-            tk.Label(warn, text=msg, bg="#fff3cd", fg="#856404",
-                     font=("Segoe UI", 9), wraplength=640,
-                     justify="left", padx=12, pady=6).pack(anchor="w")
+        frame = tk.Frame(self, bg="#1e1e2e")
+        frame.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # ── Main content ──
-        body = tk.Frame(self, bg="#f0f2f5")
-        body.pack(fill="both", expand=True, padx=16, pady=12)
-
-        # Capture button
-        btn_frame = tk.Frame(body, bg="#f0f2f5")
-        btn_frame.pack(fill="x", pady=(0, 12))
-
-        self.btn_capture = tk.Button(
-            btn_frame,
-            text="📷  Зробити скріншот і перекласти",
+        self.btn = tk.Button(
+            frame,
+            text="🔍  Виділити текст",
             command=self._start_selection,
             bg="#0066cc", fg="white",
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", 10, "bold"),
             relief="flat", bd=0,
-            padx=20, pady=10,
+            padx=10, pady=6,
             cursor="hand2",
             activebackground="#0052a3",
             activeforeground="white"
         )
-        self.btn_capture.pack(side="left")
+        self.btn.pack(side="left", fill="both", expand=True)
 
-        self.btn_copy = tk.Button(
-            btn_frame,
-            text="📋  Копіювати",
-            command=self._copy_translation,
-            bg="#e8e8e8", fg="#333",
-            font=("Segoe UI", 11),
-            relief="flat", bd=0,
-            padx=14, pady=10,
-            cursor="hand2",
-            state="disabled"
-        )
-        self.btn_copy.pack(side="left", padx=(8, 0))
+        hint = tk.Label(frame, text="Ctrl\n+⇧+S",
+                        bg="#1e1e2e", fg="#555",
+                        font=("Segoe UI", 7))
+        hint.pack(side="right", padx=(4, 0))
 
-        # Status bar
-        self.status_var = tk.StringVar(value="Готово. Натисніть кнопку або Ctrl+Shift+S")
-        self.status_lbl = tk.Label(body, textvariable=self.status_var,
-                                   bg="#f0f2f5", fg="#555",
-                                   font=("Segoe UI", 9), anchor="w")
-        self.status_lbl.pack(fill="x", pady=(0, 8))
+        if not self._tesseract_ok:
+            self.configure(bg="#3a1a00")
+            self.btn.config(text="⚠ Tesseract не знайдено",
+                            bg="#cc4400", font=("Segoe UI", 9))
 
-        # Progress bar
-        self.progress = ttk.Progressbar(body, mode="indeterminate", length=200)
+        # Make window draggable via button too
+        self.btn.bind("<ButtonPress-1>", self._drag_start, add="+")
+        self.btn.bind("<B1-Motion>", self._drag_move, add="+")
 
-        # ── Panels side by side ──
-        panels = tk.Frame(body, bg="#f0f2f5")
-        panels.pack(fill="both", expand=True)
-        panels.columnconfigure(0, weight=1)
-        panels.columnconfigure(1, weight=1)
-        panels.rowconfigure(1, weight=1)
+    def _drag_start(self, e):
+        self._dx = e.x_root - self.winfo_x()
+        self._dy = e.y_root - self.winfo_y()
 
-        tk.Label(panels, text="Розпізнаний текст (EN)",
-                 bg="#f0f2f5", fg="#333",
-                 font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w", padx=(0,4))
-        tk.Label(panels, text="Переклад (UA)",
-                 bg="#f0f2f5", fg="#333",
-                 font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="w", padx=(4,0))
+    def _drag_move(self, e):
+        self.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
 
-        self.txt_ocr = scrolledtext.ScrolledText(
-            panels, font=("Consolas", 10), wrap="word",
-            bg="white", fg="#222", relief="flat",
-            borderwidth=1, highlightbackground="#ccc",
-            highlightthickness=1, state="disabled"
-        )
-        self.txt_ocr.grid(row=1, column=0, sticky="nsew", padx=(0, 4), pady=(4, 0))
-
-        self.txt_trans = scrolledtext.ScrolledText(
-            panels, font=("Segoe UI", 10), wrap="word",
-            bg="white", fg="#111", relief="flat",
-            borderwidth=1, highlightbackground="#ccc",
-            highlightthickness=1, state="disabled"
-        )
-        self.txt_trans.grid(row=1, column=1, sticky="nsew", padx=(4, 0), pady=(4, 0))
-
-        # Preview
-        preview_row = tk.Frame(body, bg="#f0f2f5")
-        preview_row.pack(fill="x", pady=(10, 0))
-        tk.Label(preview_row, text="Скріншот:",
-                 bg="#f0f2f5", fg="#555",
-                 font=("Segoe UI", 9)).pack(side="left")
-        self.preview_lbl = tk.Label(preview_row, bg="#dde", text="(ще немає)",
-                                    fg="#888", font=("Segoe UI", 9),
-                                    relief="flat", cursor="hand2")
-        self.preview_lbl.pack(side="left", padx=(6, 0))
-
-    # ── Actions ─────────────────────────────
     def _start_selection(self):
+        if self._popup:
+            try: self._popup.destroy()
+            except: pass
         self.withdraw()
-        self.after(200, lambda: SelectionOverlay(self, self._on_area_selected))
+        self.after(150, lambda: SelectionOverlay(self, self._on_area_selected))
 
     def _on_area_selected(self, x1, y1, x2, y2):
         self.deiconify()
-        self._set_status("Захоплення скріншоту…", busy=True)
-        threading.Thread(target=self._process, args=(x1, y1, x2, y2), daemon=True).start()
+        self.btn.config(state="disabled", text="⏳ Обробка…")
 
-    def _process(self, x1, y1, x2, y2):
+        # Show loading popup near selection
+        cx = (x1 + x2) // 2 - 150
+        cy = y2
+        self._loading = LoadingPopup(self, cx, cy)
+
+        threading.Thread(
+            target=self._process,
+            args=(x1, y1, x2, y2, cx, cy),
+            daemon=True
+        ).start()
+
+    def _process(self, x1, y1, x2, y2, px, py):
         try:
-            # Screenshot
             img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
-            self._show_preview(img)
 
-            # OCR
-            self._set_status("Розпізнавання тексту (OCR)…", busy=True)
+            # Upscale for better OCR
+            w, h = img.size
+            if w < 400:
+                img = img.resize((w * 3, h * 3), Image.LANCZOS)
+            elif w < 800:
+                img = img.resize((w * 2, h * 2), Image.LANCZOS)
+
             config = "--oem 3 --psm 6"
             text = pytesseract.image_to_string(img, lang="eng", config=config).strip()
+
             if not text:
-                self._set_status("⚠  Текст не розпізнано. Спробуйте більшу область.", busy=False)
-                return
-
-            self._set_text(self.txt_ocr, text)
-
-            # Translate
-            self._set_status("Переклад…", busy=True)
-            translator = GoogleTranslator(source="en", target="uk")
-            translated = translator.translate(text)
-            self._set_text(self.txt_trans, translated)
-
-            self._set_status(f"✅ Готово! Розпізнано {len(text.split())} слів.", busy=False)
-            self.after(0, lambda: self.btn_copy.config(state="normal"))
+                result = "⚠ Текст не розпізнано.\nСпробуйте виділити більшу область або текст чіткіший."
+            else:
+                translator = GoogleTranslator(source="en", target="uk")
+                result = translator.translate(text)
 
         except Exception as e:
-            self._set_status(f"❌ Помилка: {e}", busy=False)
+            result = f"❌ Помилка: {e}"
 
-    def _set_text(self, widget, text):
-        def _do():
-            widget.config(state="normal")
-            widget.delete("1.0", "end")
-            widget.insert("1.0", text)
-            widget.config(state="disabled")
-        self.after(0, _do)
+        self.after(0, lambda: self._show_result(result, px, py))
 
-    def _show_preview(self, img):
-        try:
-            thumb = img.copy()
-            thumb.thumbnail((220, 80))
-            photo = ImageTk.PhotoImage(thumb)
-            def _do():
-                self.preview_lbl.config(image=photo, text="")
-                self.preview_lbl.image = photo
-            self.after(0, _do)
-        except Exception:
-            pass
+    def _show_result(self, text, px, py):
+        # Close loading
+        if self._loading:
+            try: self._loading.destroy()
+            except: pass
+            self._loading = None
 
-    def _set_status(self, msg, busy=False):
-        def _do():
-            self.status_var.set(msg)
-            if busy:
-                self.progress.pack(fill="x", pady=(0, 4))
-                self.progress.start(12)
-                self.btn_capture.config(state="disabled")
-            else:
-                self.progress.stop()
-                self.progress.pack_forget()
-                self.btn_capture.config(state="normal")
-        self.after(0, _do)
+        self.btn.config(state="normal", text="🔍  Виділити текст")
 
-    def _copy_translation(self):
-        text = self.txt_trans.get("1.0", "end").strip()
-        if not text:
-            return
-        if HAS_CLIPBOARD:
-            pyperclip.copy(text)
-        else:
-            self.clipboard_clear()
-            self.clipboard_append(text)
-        self.btn_copy.config(text="✅ Скопійовано!")
-        self.after(2000, lambda: self.btn_copy.config(text="📋  Копіювати"))
+        # Show translation popup
+        self._popup = TranslationPopup(self, text, px, py)
 
-
-if __name__ == "__main__":
-    app = OCRTranslatorApp()
-    app.mainloop()
