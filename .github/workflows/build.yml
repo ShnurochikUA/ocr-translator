@@ -26,7 +26,7 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name "OCR_Translator" --icon=icon.ico ocr_translator.py
 
-      - name: Upload EXE as artifact
+      - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
           name: OCR_Translator_Windows
