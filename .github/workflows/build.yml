@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pillow pytesseract deep-translator pyperclip pyinstaller
+          pip install pillow pytesseract deep-translator pyperclip pynput pyinstaller
 
       - name: Build EXE
         run: |
